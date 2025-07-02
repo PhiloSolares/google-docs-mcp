@@ -526,21 +526,55 @@ throw new UserError(`Failed to fix list formatting: ${error.message || 'Unknown 
 
 server.addTool({
 name: 'addComment',
-description: 'Adds a comment anchored to a specific text range. REQUIRES DRIVE API SCOPES/SETUP.',
+description: 'Adds a comment anchored to a specific text range. Can target by range or by finding specific text.',
 parameters: DocumentIdParameter.extend({
-  startIndex: z.number().int().min(1).describe('The starting index of the text range (inclusive, starts from 1).'),
-  endIndex: z.number().int().min(1).describe('The ending index of the text range (exclusive).'),
+  // Either provide text to find OR provide start/end indices
+  textToFind: z.string().min(1).optional().describe('The exact text string to locate and comment on.'),
+  matchInstance: z.number().int().min(1).optional().default(1).describe('Which instance of the text to target (1st, 2nd, etc.). Defaults to 1.'),
+  startIndex: z.number().int().min(1).optional().describe('The starting index of the text range (inclusive, starts from 1).'),
+  endIndex: z.number().int().min(1).optional().describe('The ending index of the text range (exclusive).'),
   commentText: z.string().min(1).describe("The content of the comment."),
-}).refine(data => data.endIndex > data.startIndex, {
+}).refine(data => {
+  const hasTextToFind = !!data.textToFind;
+  const hasIndices = !!(data.startIndex && data.endIndex);
+  return hasTextToFind || hasIndices;
+}, {
+  message: "Either 'textToFind' or both 'startIndex' and 'endIndex' must be provided.",
+}).refine(data => {
+  if (data.startIndex && data.endIndex) {
+    return data.endIndex > data.startIndex;
+  }
+  return true;
+}, {
   message: "endIndex must be greater than startIndex",
   path: ["endIndex"],
 }),
 execute: async (args, { log }) => {
-log.info(`Attempting to add comment "${args.commentText}" to range ${args.startIndex}-${args.endIndex} in doc ${args.documentId}`);
 const drive = await getDriveClient();
 const docs = await getDocsClient();
-  
+let { startIndex, endIndex } = args; // Get from args directly
+
+log.info(`Adding comment "${args.commentText}" to doc ${args.documentId}. TextToFind: ${args.textToFind}, Indices: ${startIndex}-${endIndex}`);
+
 try {
+  // Determine target range
+  if (args.textToFind) {
+    const range = await GDocsHelpers.findTextRange(docs, args.documentId, args.textToFind, args.matchInstance);
+    if (!range) {
+      throw new UserError(`Could not find instance ${args.matchInstance} of text "${args.textToFind}".`);
+    }
+    startIndex = range.startIndex;
+    endIndex = range.endIndex;
+    log.info(`Found text "${args.textToFind}" (instance ${args.matchInstance}) at range ${startIndex}-${endIndex}`);
+  }
+
+  if (startIndex === undefined || endIndex === undefined) {
+    throw new UserError("Target range could not be determined.");
+  }
+  if (endIndex <= startIndex) {
+    throw new UserError("End index must be greater than start index for comment.");
+  }
+
   // First, get the document to find the revision ID
   const docResponse = await docs.documents.get({
     documentId: args.documentId,
@@ -556,16 +590,14 @@ try {
       content: args.commentText,
       quotedFileContent: {
         mimeType: 'text/html',
-        value: `Range: ${args.startIndex}-${args.endIndex}`
+        value: `Range: ${startIndex}-${endIndex}`
       },
       anchor: JSON.stringify({
         'r': revisionId,
         'a': [{
-          'txt': {
-            'o': args.startIndex - 1,  // Convert to 0-based index
-            'l': args.endIndex - args.startIndex,
-            'ml': args.endIndex - args.startIndex
-          }
+          't': 'txt',
+          's': startIndex,      // Use 1-based index as found
+          'e': endIndex         // Use 1-based index as found
         }]
       })
     },
@@ -573,9 +605,10 @@ try {
   });
   
   log.info(`Successfully created comment with ID: ${commentResponse.data.id}`);
-  return `Comment added successfully: "${args.commentText}" at range ${args.startIndex}-${args.endIndex}.`;
+  return `Comment added successfully: "${args.commentText}" at range ${startIndex}-${endIndex}.`;
 } catch (error: any) {
   log.error(`Error adding comment in doc ${args.documentId}: ${error.message || error}`);
+  if (error instanceof UserError) throw error;
   if (error.code === 403) throw new UserError("Permission denied. Make sure the app has permission to add comments.");
   if (error.code === 404) throw new UserError(`Document not found (ID: ${args.documentId}).`);
   throw new UserError(`Failed to add comment: ${error.message || 'Unknown error'}`);
