@@ -1,0 +1,36 @@
+{
+    "mcpServers": {
+      "supabase": {
+        "command": "npx",
+        "args": [
+          "-y",
+          "@supabase/mcp-server-supabase",
+          "--read-only",
+          "--project-ref=araiaeoydywoevlrbufy"
+        ],
+        "env": {
+          "SUPABASE_ACCESS_TOKEN": "sbp_0abba9a3412d10e07ce79a9dd1f1b59a0d498132"
+        }
+      },
+       "google-docs-mcp": {
+      "command": "node",
+      "args": [
+        "/Users/philo/Documents/GitHub/google-docs-mcp/dist/server.js"
+      ],
+      "env": {}
+    },
+      "mcp-perplexity": {
+      "command": "uvx",
+      "args": ["mcp-perplexity"],
+      "env": {
+        "PERPLEXITY_API_KEY": "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",
+        "PERPLEXITY_MODEL": "sonar-pro"
+      }
+    },
+    "Context7": {
+      "command": "npx",
+      "args": ["-y", "@upstash/context7-mcp@latest"]
+    }
+
+    }
+  }

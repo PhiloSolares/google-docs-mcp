@@ -30,14 +30,14 @@ async function initializeGoogleClient() {
 if (googleDocs && googleDrive) return { authClient, googleDocs, googleDrive };
 if (!authClient) { // Check authClient instead of googleDocs to allow re-attempt
 try {
-console.error("Attempting to authorize Google API client...");
+// console.error("Attempting to authorize Google API client...");
 const client = await authorize();
 authClient = client; // Assign client here
 googleDocs = google.docs({ version: 'v1', auth: authClient });
 googleDrive = google.drive({ version: 'v3', auth: authClient });
-console.error("Google API client authorized successfully.");
+// console.error("Google API client authorized successfully.");
 } catch (error) {
-console.error("FATAL: Failed to initialize Google API client:", error);
+// console.error("FATAL: Failed to initialize Google API client:", error);
 authClient = null; // Reset on failure
 googleDocs = null;
 googleDrive = null;
@@ -62,13 +62,15 @@ return { authClient, googleDocs, googleDrive };
 
 // Set up process-level unhandled error/rejection handlers to prevent crashes
 process.on('uncaughtException', (error) => {
-  console.error('Uncaught Exception:', error);
+  // Silently handle uncaught exceptions to avoid corrupting JSON output
+  // console.error('Uncaught Exception:', error);
   // Don't exit process, just log the error and continue
   // This will catch timeout errors that might otherwise crash the server
 });
 
 process.on('unhandledRejection', (reason, promise) => {
-  console.error('Unhandled Promise Rejection:', reason);
+  // Silently handle unhandled rejections to avoid corrupting JSON output
+  // console.error('Unhandled Promise Rejection:', reason);
   // Don't exit process, just log the error and continue
 });
 
@@ -535,19 +537,48 @@ parameters: DocumentIdParameter.extend({
 }),
 execute: async (args, { log }) => {
 log.info(`Attempting to add comment "${args.commentText}" to range ${args.startIndex}-${args.endIndex} in doc ${args.documentId}`);
-// Requires Drive API client and appropriate scopes.
-// const { authClient } = await initializeGoogleClient(); // Get auth client if needed
-// if (!authClient) throw new UserError("Authentication client not available for Drive API.");
+const drive = await getDriveClient();
+const docs = await getDocsClient();
+  
 try {
-// await GDocsHelpers.addCommentHelper(driveClient, args.documentId, args.commentText, args.startIndex, args.endIndex);
-log.error("addComment requires Drive API setup which is not implemented.");
-throw new NotImplementedError("Adding comments requires Drive API setup and is not yet implemented in this server.");
-// return `Comment added to range ${args.startIndex}-${args.endIndex}.`;
+  // First, get the document to find the revision ID
+  const docResponse = await docs.documents.get({
+    documentId: args.documentId,
+    fields: 'revisionId'
+  });
+  
+  const revisionId = docResponse.data.revisionId || 'head';
+  
+  // Create the comment using Drive API v3
+  const commentResponse = await drive.comments.create({
+    fileId: args.documentId,
+    requestBody: {
+      content: args.commentText,
+      quotedFileContent: {
+        mimeType: 'text/html',
+        value: `Range: ${args.startIndex}-${args.endIndex}`
+      },
+      anchor: JSON.stringify({
+        'r': revisionId,
+        'a': [{
+          'txt': {
+            'o': args.startIndex - 1,  // Convert to 0-based index
+            'l': args.endIndex - args.startIndex,
+            'ml': args.endIndex - args.startIndex
+          }
+        }]
+      })
+    },
+    fields: 'id,author,content,createdTime'
+  });
+  
+  log.info(`Successfully created comment with ID: ${commentResponse.data.id}`);
+  return `Comment added successfully: "${args.commentText}" at range ${args.startIndex}-${args.endIndex}.`;
 } catch (error: any) {
-log.error(`Error adding comment in doc ${args.documentId}: ${error.message || error}`);
-if (error instanceof UserError) throw error;
-if (error instanceof NotImplementedError) throw error;
-throw new UserError(`Failed to add comment: ${error.message || 'Unknown error'}`);
+  log.error(`Error adding comment in doc ${args.documentId}: ${error.message || error}`);
+  if (error.code === 403) throw new UserError("Permission denied. Make sure the app has permission to add comments.");
+  if (error.code === 404) throw new UserError(`Document not found (ID: ${args.documentId}).`);
+  throw new UserError(`Failed to add comment: ${error.message || 'Unknown error'}`);
 }
 }
 });
@@ -620,20 +651,33 @@ execute: async (args, { log }) => {
     if (args.backgroundColor !== undefined) styleParams.backgroundColor = args.backgroundColor;
     if (args.linkUrl !== undefined) styleParams.linkUrl = args.linkUrl;
 
-    // Find the text range
-    const range = await GDocsHelpers.findTextRange(docs, args.documentId, args.textToFind, args.matchInstance);
-    if (!range) {
-      throw new UserError(`Could not find instance ${args.matchInstance} of text "${args.textToFind}".`);
-    }
+    // Check if text contains apostrophes - if so, use split-and-highlight approach
+    const hasApostrophe = /[\u0027\u2019\u2018\u201B\u0060\u00B4]/.test(args.textToFind);
+    
+    if (hasApostrophe) {
+      // Use split-and-highlight approach for apostrophe-containing text
+      const success = await GDocsHelpers.highlightApostrophePhrase(docs, args.documentId, args.textToFind, args.matchInstance, styleParams);
+      if (success) {
+        return `Successfully applied formatting to apostrophe phrase "${args.textToFind}" using split-highlight method.`;
+      } else {
+        throw new UserError(`Could not find instance ${args.matchInstance} of apostrophe phrase "${args.textToFind}".`);
+      }
+    } else {
+      // Use standard approach for non-apostrophe text
+      const range = await GDocsHelpers.findTextRange(docs, args.documentId, args.textToFind, args.matchInstance);
+      if (!range) {
+        throw new UserError(`Could not find instance ${args.matchInstance} of text "${args.textToFind}".`);
+      }
 
-    // Build and execute the request
-    const requestInfo = GDocsHelpers.buildUpdateTextStyleRequest(range.startIndex, range.endIndex, styleParams);
-    if (!requestInfo) {
-      return "No valid text styling options were provided.";
-    }
+      // Build and execute the request
+      const requestInfo = GDocsHelpers.buildUpdateTextStyleRequest(range.startIndex, range.endIndex, styleParams);
+      if (!requestInfo) {
+        return "No valid text styling options were provided.";
+      }
 
-    await GDocsHelpers.executeBatchUpdate(docs, args.documentId, [requestInfo.request]);
-    return `Successfully applied formatting to instance ${args.matchInstance} of "${args.textToFind}".`;
+      await GDocsHelpers.executeBatchUpdate(docs, args.documentId, [requestInfo.request]);
+      return `Successfully applied formatting to instance ${args.matchInstance} of "${args.textToFind}".`;
+    }
   } catch (error: any) {
     log.error(`Error in formatMatchingText for doc ${args.documentId}: ${error.message || error}`);
     if (error instanceof UserError) throw error;
